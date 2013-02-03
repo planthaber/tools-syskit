@@ -136,86 +136,112 @@ module Syskit
                 return new, removed
             end
 
-            # Adds source_task (resp. sink_task) to +set+ if modifying
-            # connection specified in +mappings+ will require source_task (resp.
-            # sink_task) to be restarted.
-            #
-            # Restart is required by having the task's input ports marked as
-            # 'static' in the oroGen specification
-            def update_restart_set(set, source_task, sink_task, mappings)
-                if !set.include?(source_task)
-                    needs_restart = mappings.any? do |source_port, sink_port|
-                        source_task.running? && source_task.output_port_model(source_port).static?
-                    end
-                    if needs_restart
-                        set << source_task
-                    end
-                end
-
-                if !set.include?(sink_task)
-                    needs_restart =  mappings.any? do |source_port, sink_port|
-                        sink_task.running? && sink_task.input_port_model(sink_port).static?
-                    end
-
-                    if needs_restart
-                        set << sink_task
-                    end
-                end
-                set
-            end
-
-            # Apply all connection changes on the system. The principle is to
-            # use a transaction-based approach: i.e. either we apply everything
-            # or nothing.
-            #
-            # See #compute_connection_changes for the format of +new+ and
-            # +removed+
-            #
-            # Returns a false value if it could not apply the changes and a true
-            # value otherwise.
-            def apply_connection_changes(new, removed)
-                restart_tasks = ValueSet.new
-
-                # Don't do anything if some of the connection changes are
-                # between static ports and the relevant tasks are running
-                #
-                # Moreover, we check that the tasks are ready to be connected.
-                # We do it only for the new set, as the removed connections are
-                # obviously between tasks that can be connected ;-)
-                new.each do |(source, sink), mappings|
-                    if !dry_run?
-                        if !sink.setup? || !source.setup?
-                            debug do
-                                debug "cannot modify connections from #{source}, either one is not yet set up"
-                                debug "  to #{sink}"
-                                debug "  source.executable?:      #{source.executable?}"
-                                debug "  source.ready_for_setup?: #{source.ready_for_setup?}"
-                                debug "  source.setup?:           #{source.setup?}"
-                                debug "  sink.executable?:        #{sink.executable?}"
-                                debug "  sink.ready_for_setup?:   #{sink.ready_for_setup?}"
-                                debug "  sink.setup?:             #{sink.setup?}"
+            # Given a connection list, finds out which tasks will need to be
+            # restarted for some of these connections to be applied.
+            def update_restart_set(set, connections)
+                connections.each do |(out_task, in_task), mappings|
+                    if out_task.running? && !set.include?(out_task)
+                        mappings.each_key do |out_port_name, in_port_name|
+                            if out_task.model.find_output_port(out_port_name).static?
+                                set << out_task
                                 break
                             end
-                            throw :cancelled
                         end
                     end
 
-                    update_restart_set(restart_tasks, source, sink, mappings.keys)
-                end
-
-                restart_task_proxies = ValueSet.new
-                removed.each do |(source, sink), mappings|
-                    update_restart_set(restart_task_proxies, source, sink, mappings)
-                end
-                restart_task_proxies.each do |corba_handle|
-                    klass = TaskContext.model_for(corba_handle.model)
-                    task = plan.find_tasks(klass).running.
-                        find { |t| t.orocos_name == corba_handle.name }
-
-                    if task
-                        restart_tasks << task
+                    if in_task.running? && !set.include?(in_task)
+                        mappings.each_key do |out_port_name, in_port_name|
+                            if in_task.model.find_input_port(in_port_name).static?
+                                set << in_task
+                                break
+                            end
+                        end
                     end
                 end
+
+                set
+            end
+
+            # Specialized version of {partition_connections} for the set of new
+            # connections. In addition to the criteria applied by
+            # #partition_connections, it delays creating new connections towards
+            # dynamic ports on tasks that are not yet configured (as #configure
+            # is supposed to create the ports)
+            def partition_new_connections(connections)
+                partition_connections(connections) do |out_port, in_port, policy|
+                    (out_port.dynamic? && !out_task.setup?) ||
+                        (in_port.dynamic? && !in_task.setup?)
+                end
+            end
+
+            # Partition connections between a set of connections that can be
+            # modified right away, a set that will need to be applied later and
+            # a set that can only be applied atomically, i.e. all at once when
+            # all the other connections also have been applied.
+            #
+            # Each connection set is represented as an array of ((output_task,
+            # input_task), mappings) tuples where +mappings+ maps
+            # (output_port_name, input_port_name) to the desired connection
+            # policy. This format is referred as ConnectionList in the rest of
+            # this documentation.
+            #
+            # This is a partition function that is common to connection removal
+            # and additions. It uses the following criteria:
+            #
+            # A connection can be applied right away if:
+            #  - they involve at least one stopped task
+            # A connection must be delayed if:
+            #  - it involves a port that requires restarting the task, and the
+            #    task is running
+            # All other connections land in the atomic set
+            #
+            # @yieldparam [(OutputPort,InputPort,Hash)] a connection
+            #   specification
+            # @yieldreturn true if the connection needs to be delayed, false
+            #   otherwise
+            # @param [ConnectionList] connections the connection list to
+            #   partition
+            # @return [(ConnectionList,ConnectionList,ConnectionList)] the
+            #   partitioned sets
+            def partition_connections(connections)
+                incremental, delayed, global = [], [], []
+                connections.each do |tasks, mappings|
+                    incremental_mappings, delayed_mappings, global_mappings = Hash.new, Hash.new, Hash.new
+                    mappings.each do |port_names, policy|
+                        out_port = tasks[0].model.find_output_port(port_names[0])
+                        in_port  = tasks[1].model.find_input_port(port_names[1])
+
+                        if block_given? && yield(out_port, in_port, policy)
+                            delayed_mappings[port_names] = policy
+                        elsif in_port.static? && in_task.running?
+                            delayed_mappings[port_names] = policy
+                        elsif !out_task.running? || !in_task.running?
+                            incremental_mappings[port_names] = policy
+                        else
+                            global_mappings[port_names] = policy
+                        end
+                    end
+                    incremental << [tasks, incremental_mappings] if !incremental_mappings.empty?
+                    delayed     << [tasks, delayed_mappings]     if !delayed_mappings.empty?
+                    global      << [tasks, global_mappings]      if !global_mappings.empty?
+                end
+                return incremental, delayed, global
+            end
+
+            def handle_connections_requiring_restart(delayed_new, delayed_removed)
+                needs_restart = ValueSet.new
+                update_restart_set(needs_restart, delayed_new)
+                restart_orocos_tasks = ValueSet.new
+                update_restart_set(restart_orocos_tasks, delayed_removed)
+                restart_orocos_tasks.each do |orocos_task|
+                    klass = TaskContext.model_for(orocos_task.model)
+                    task = plan.find_tasks(klass).running.
+                        find { |t| t.orocos_name == orocos_task.name }
+                    if task
+                        needs_restart << task
+                    end
+                end
+                needs_restart -= restarting_tasks
 
                 if !restart_tasks.empty?
                     new_tasks = Array.new
@@ -233,6 +259,32 @@ module Syskit
                     end
                     throw :cancelled, all_stopped
                 end
+
+                restarting_tasks | needs_restart
+            end
+
+            # Apply all connection changes on the system. The principle is to
+            # use a transaction-based approach: i.e. either we apply everything
+            # or nothing.
+            #
+            # See #compute_connection_changes for the format of +new+ and
+            # +removed+
+            #
+            # Returns a false value if it could not apply the changes and a true
+            # value otherwise.
+            def apply_connection_changes(new, removed, restarting_tasks)
+                restart_tasks = ValueSet.new
+
+                # Partition the connections between the ones we can apply and
+                # the one that we need to delay
+                new, delayed_new, atomic_new = partition_new_connections(new)
+                removed, delayed_removed, atomic_removed = partition_connections(removed)
+
+                # Find out which tasks must be restarted. If we already are
+                # restarting the task, no new connections are going towards it,
+                # they would go towards the new task.
+                restarting_tasks = handle_connections_requiring_restart(delayed_new, delayed_removed, restarting_tasks)
+
 
                 # Remove connections first
                 removed.each do |(source_task, sink_task), mappings|
