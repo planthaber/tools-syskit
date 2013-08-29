@@ -7,6 +7,7 @@ module Syskit
         class Instanciate < Qt::Widget
             attr_reader :apply_btn
             attr_reader :instance_txt
+            attr_reader :generate_script
 
             attr_reader :display
             attr_reader :page
@@ -54,6 +55,9 @@ module Syskit
 
                 @permanent = permanent
                 @instance_txt.text = arguments
+                @generate_script.connect(SIGNAL('clicked()')) do
+                    generate_script
+                end
                 compute
             end
 
@@ -61,8 +65,10 @@ module Syskit
                 toolbar_layout = Qt::HBoxLayout.new
                 @apply_btn = Qt::PushButton.new("Reload && Apply", self)
                 @instance_txt = Qt::LineEdit.new(self)
+                @generate_script = Qt::PushButton.new("Generate Script", self)
                 toolbar_layout.add_widget(@apply_btn)
                 toolbar_layout.add_widget(@instance_txt)
+                toolbar_layout.add_widget(@generate_script)
                 toolbar_layout
             end
 
@@ -79,6 +85,81 @@ module Syskit
                 rendering.render_plan
             end
             slots 'compute()'
+
+            TEMPLATE = <<-EOF
+require 'rock/bundle'
+Rock::Bundles.initialize
+Rock::Bundles.run "<%= deployments.sort.join('", "') %>" do
+<% tasks.each do |task, var_name| %>
+    <%= var_name %> = Rock::Bundles.get("<%= task.orocos_name %>")
+<% end %>
+    Orocos.log_all
+<% connections.each do |out_task, out_port, in_task, in_port, policy| %>
+    <%= out_task %>.<%= out_port %>.connect_to <%= in_task %>.<%= in_port %>, <%= policy.map { |k,v| ":\#{k} => \#{v}" }.join(", ") %>
+<% end %>
+<% conf.each do |task, conf| %>
+    Orocos.conf.apply(task, conf)
+<% end %>
+<% frames.each do |task, local_frame, global_frame| %>
+    <%= task %>.<%= local_frame %>_frame = "<%= global_frame %>"
+<% end %>
+    Orocos.transformer.setup(<%= tasks.values.sort.join(", ") %>)
+
+<% tasks.each do |task, var_name| %>
+<%   if task.model.orogen_model.needs_configuration? %>
+    <%= var_name %>.configure
+<%   end %>
+<% end %>
+<% tasks.each do |task, var_name| %>
+    <%= var_name %>.start
+<% end %>
+end
+            EOF
+
+            def generate_script
+                # Gather all the deployments that are required
+                deployments = []
+                plan.find_tasks(Syskit::Deployment).each do |deployment_task| 
+                    deployments << deployment_task.deployment_name
+                end
+                tasks = Hash.new
+                plan.find_tasks(Syskit::TaskContext).each do |task|
+                    puts task.model.name
+                    if task.model.name !~ /Logger::Logger/
+                        task_name = task.orocos_name
+                        tasks[task] = task_name.gsub(/[^\w]/, '_')
+                    end
+                end
+
+                connections = []
+                tasks.each do |task, var_name|
+                    task.each_concrete_output_connection do |out_port, in_port, in_task, policy|
+                        if tasks[in_task]
+                            connections << [tasks[task], out_port, tasks[in_task], in_port, policy]
+                        end
+                    end
+                end
+
+                conf = []
+                tasks.each do |task, var_name|
+                    if task.conf != ['default']
+                        conf << [var_name, task.conf]
+                    end
+                end
+
+                frames = []
+                tasks.each do |task, var_name|
+                    if task.model.transformer && !task.selected_frames.empty?
+                        task.selected_frames.each do |local_name, global_name|
+                            if task.model.orogen_model.has_property?("#{local_name}_frame")
+                                frames << [var_name, local_name, global_name]
+                            end
+                        end
+                    end
+                end
+
+                puts ERB.new(TEMPLATE, nil, "<>").result(binding)
+            end
 
             def self.parse_passes(remaining)
                 passes = []
