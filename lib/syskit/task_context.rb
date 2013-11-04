@@ -355,19 +355,6 @@ module Syskit
                 return RTT_CONFIGURABLE_STATES.include?(state)
             end
 
-            # Returns true if the underlying Orocos task has been configured and
-            # can be started
-            #
-            # The general protocol is:
-            #
-            #  if !setup? && ready_for_setup?
-            #      setup
-            #  end
-            #
-            def setup?
-                @setup
-            end
-
             # Announces that the task is indeed setup
             #
             # This is meant for internal use. Don't use it unless you know what
