@@ -24,7 +24,7 @@ module Syskit
 		    next
 		end
 
-                if t.pending? && !t.setup? 
+                if t.pending? && !t.being_setup? && !t.setup? 
                     if t.ready_for_setup? && Syskit.conf.auto_configure?
                         begin
                             t.setup 

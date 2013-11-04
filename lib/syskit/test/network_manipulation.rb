@@ -28,6 +28,15 @@ module Syskit
                 task
             end
 
+            def stub_syskit_deployed_task_context(name = 'task', task_model = nil, arguments = Hash.new, &block)
+                task = syskit_deploy_task_context(task_model || name, name, &block)
+                arguments.each do |k, v|
+                    task.send("#{k}=", v)
+                end
+                task
+            end
+
+
             # Create a new stub deployment model that can deploy a given task
             # context model
             #
@@ -77,9 +86,9 @@ module Syskit
             #
             # @overload syskit_deploy_task_context(task_m, 'stub_task')
             # @overload syskit_deploy_task_context('Task', 'stub_task') { # output_port ... }
-            def syskit_deploy_task_context(task_model, orocos_name = 'task')
+            def syskit_deploy_task_context(task_model, orocos_name = 'task', &block)
                 if task_model.respond_to?(:to_str)
-                    task_model = stub_syskit_task_context_model(task_model, &proc)
+                    task_model = stub_syskit_task_context_model(task_model, &block)
                 end
                 deployment_m = stub_syskit_deployment_model(task_model, orocos_name)
                 plan.add(deployment = deployment_m.new(:on => 'stubs'))
@@ -110,6 +119,8 @@ module Syskit
                 end
                 component.arguments[:conf] ||= []
                 component.setup
+                engine.join_all_worker_threads
+                process_events
             end
 
             # Start this component
@@ -133,6 +144,7 @@ module Syskit
                 if !component.running?
                     if !component.starting?
                         component.start!
+                        engine.join_all_worker_threads
                     end
                     assert_event_emission component.start_event
                 end

@@ -408,7 +408,7 @@ describe Syskit::TaskContext do
     describe "#is_setup!" do
         attr_reader :task
         before do
-            plan.add(@task = Syskit::TaskContext.new_submodel.new(:orocos_name => "", :conf => []))
+            plan.add(@task = stub_syskit_deployed_task_context('task', nil, :conf => []))
             assert !task.executable?
         end
         it "resets the executable flag if all inputs are connected" do
@@ -524,14 +524,14 @@ describe Syskit::TaskContext do
             orocos_task.should_receive(:rtt_state).once.and_return(:PRE_OPERATIONAL)
             flexmock(task).should_receive(:ready_for_setup?).with(:PRE_OPERATIONAL).and_return(true)
             task.needs_reconfiguration!
-            task.setup
+            syskit_setup_component(task)
             assert !task.needs_reconfiguration?
         end
         it "registers the current task configuration" do
             orocos_task.should_receive(:rtt_state).once.and_return(:PRE_OPERATIONAL)
             flexmock(task).should_receive(:ready_for_setup?).with(:PRE_OPERATIONAL).and_return(true)
             task.needs_reconfiguration!
-            task.setup
+            syskit_setup_component(task)
             assert_equal [], Syskit::TaskContext.configured['task'][1]
         end
         it "calls the user-provided #configure method after prepare_for_setup" do
@@ -558,10 +558,22 @@ describe Syskit::TaskContext do
                 flexmock(task).should_receive(:configure).once
                 task.setup
             end
+            it "resets #being_setup to false if the task configure method fails" do
+                orocos_task.should_receive(:configure).and_raise(ArgumentError)
+                flexmock(task).should_receive(:is_setup!).never
+                task.setup
+                process_events
+                assert !task.being_setup?
+            end
             it "does not call is_setup! if the task's configure method fails" do
                 orocos_task.should_receive(:configure).and_raise(ArgumentError)
                 flexmock(task).should_receive(:is_setup!).never
-                assert_raises(ArgumentError) { task.setup }
+                task.setup
+                inhibit_fatal_messages do
+                    process_events
+                end
+                assert_kind_of Roby::EmissionFailed,  task.start_event.unreachability_reason
+                assert_kind_of ArgumentError,  task.start_event.unreachability_reason.error
             end
             it "does not call is_setup! if the user-provided configure method raises" do
                 flexmock(task).should_receive(:configure).and_raise(ArgumentError)

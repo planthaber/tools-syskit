@@ -373,7 +373,10 @@ module Syskit
             # This is meant for internal use. Don't use it unless you know what
             # you are doing
             def is_setup!
-                @setup = true
+                TaskContext.needs_reconfiguration.delete(orocos_name)
+                TaskContext.configured[orocos_name] = [orocos_task.model, self.conf.dup]
+                super
+
                 if all_inputs_connected?
                     self.executable = nil
                     Runtime.debug { "#{self} is setup and all its inputs are connected, set executable to nil and executable? = #{executable?}" }
@@ -453,14 +456,14 @@ module Syskit
 
                 if needs_configuration
                     ::Robot.info "setting up #{self}"
-                    orocos_task.configure(false)
+ 
+                    start_event.achieve_asynchronously :emit_on_success => false, :callback => proc { is_setup! } do
+                        orocos_task.configure(false)
+                    end
                 else
                     ::Robot.info "#{self} was already configured"
+                    is_setup!
                 end
-
-                TaskContext.needs_reconfiguration.delete(orocos_name)
-                TaskContext.configured[orocos_name] = [orocos_task.model, self.conf.dup]
-                is_setup!
             end
 
             ##
@@ -496,7 +499,9 @@ module Syskit
 
                 ::Robot.info "starting #{to_s} (#{orocos_name})"
                 @last_orogen_state = nil
-                orocos_task.start(false)
+                start_event.achieve_asynchronously :emit_on_success => false do
+                    orocos_task.start(false)
+                end
             end
 
             # Handle a state transition by emitting the relevant events
@@ -545,7 +550,9 @@ module Syskit
 		        emit :interrupt
 		        emit :aborted
 		    elsif execution_agent && !execution_agent.finishing?
-		        orocos_task.stop(false)
+                        interrupt_event.achieve_asynchronously :emit_on_success => false do
+                            orocos_task.stop(false)
+                        end
 		    end
                 rescue Orocos::CORBA::ComError
                     # We actually aborted

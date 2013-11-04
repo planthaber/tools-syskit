@@ -133,6 +133,20 @@ module Syskit
             # configured
             attr_predicate :setup?, true
 
+            # If true, the task is being configured
+            #
+            # This is mainly used for tasks that 
+            #
+            # It is set to true by {#setup}, and reset either if the start event
+            # is marked as having failed its emission, or if is_setup! is
+            # called.
+            attr_predicate :being_setup?
+
+            # Returns true if the underlying Orocos task is being configured.
+            # 
+            # The default assumes that configuration happens synchronously, and
+            # that therefore the component is never "being setup"
+
             # Call to configure the component. User-provided configuration calls
             # should be defined in a #configure method
             #
@@ -140,12 +154,21 @@ module Syskit
             # by this method. Caller must call is_setup! after a successful call
             # to #setup
             def setup
+                @being_setup = true
+                start_event.if_unreachable :cancel_at_emission => true do
+                    @being_setup = false
+                end
                 configure
             end
 
             # User-provided part of the component configuration
             def configure
                 super if defined? super
+            end
+
+            def is_setup!
+                @being_setup = false
+                @setup = true
             end
 
             # Test if the given task could be merged in self
